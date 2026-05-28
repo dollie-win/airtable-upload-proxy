@@ -92,7 +92,10 @@ export default async function handler(req, res) {
       const createResp = await fetch(createUrl, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${pat}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fields, typecast: true }),
+        // typecast intentionally omitted: with typecast Airtable would *create*
+        // new linked records by name when a portfolioId / budgetVersionId doesn't
+        // match an existing record, which masks bad IDs as phantom records.
+        body: JSON.stringify({ fields }),
       });
       const createBody = await createResp.json().catch(() => ({}));
       if (!createResp.ok) {
