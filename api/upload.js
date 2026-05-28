@@ -1,9 +1,10 @@
 // api/upload.js
 // Vercel serverless function for creating Import Files records in Airtable.
-// React posts { target, portfolioId, budgetVersionId?, files }. The function:
-//   1) creates a new record in the Import Files table with File Type, links,
-//      Status = Pending, Uploaded At = now;
-//   2) attaches the uploaded file(s) to the new record's File Attachment field.
+// React posts { target, portfolioId, budgetVersionId?, files }. For each file
+// in the request, the function creates its own Import Files record (with that
+// file's name as File Name), links it to the Portfolio and (where applicable)
+// the Budget Version, sets Status = Pending and Uploaded At = now, then
+// attaches the file to that record's File Attachment field.
 
 const AIRTABLE_BASE_ID = 'applvQ2MJMxt2eIes';
 const IMPORT_FILES_TABLE_ID = 'tblwJC66ZxXlSrpOd';
@@ -71,69 +72,78 @@ export default async function handler(req, res) {
       }
     }
 
-    // 1) Create the Import Files record.
-    const fields = {
-      'File Name': fileList[0].filename,
-      'File Type': targetCfg.fileType,
-      'Portfolio': [portfolioId],
-      'Status': 'Pending',
-      'Uploaded At': new Date().toISOString(),
-    };
-    if (targetCfg.needsBudgetVersion) {
-      fields['Budget Version'] = [budgetVersionId];
-    }
-
     const createUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${IMPORT_FILES_TABLE_ID}`;
-    const createResp = await fetch(createUrl, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${pat}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields, typecast: true }),
-    });
-    const created = await createResp.json().catch(() => ({}));
-    if (!createResp.ok) {
-      return res.status(createResp.status).json({
-        error: 'Failed to create Import Files record',
-        target,
-        details: created,
-      });
-    }
-    const newRecordId = created.id;
-    if (!newRecordId) {
-      return res.status(500).json({ error: 'Airtable returned no record id', details: created });
-    }
+    const uploadedAt = new Date().toISOString();
+    const created = [];
 
-    // 2) Attach each file to the new record's File Attachment field.
-    const uploadUrl = `https://content.airtable.com/v0/${AIRTABLE_BASE_ID}/${newRecordId}/${encodeURIComponent(ATTACHMENT_FIELD)}/uploadAttachment`;
-    const uploadedFiles = [];
+    // For each file, create its own Import Files record and attach the file.
     for (const f of fileList) {
+      const fields = {
+        'File Name': f.filename,
+        'File Type': targetCfg.fileType,
+        'Portfolio': [portfolioId],
+        'Status': 'Pending',
+        'Uploaded At': uploadedAt,
+      };
+      if (targetCfg.needsBudgetVersion) {
+        fields['Budget Version'] = [budgetVersionId];
+      }
+
+      const createResp = await fetch(createUrl, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${pat}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields, typecast: true }),
+      });
+      const createBody = await createResp.json().catch(() => ({}));
+      if (!createResp.ok) {
+        return res.status(createResp.status).json({
+          error: 'Failed to create Import Files record',
+          target,
+          failedAt: f.filename,
+          created,
+          details: createBody,
+        });
+      }
+      const recordId = createBody.id;
+      if (!recordId) {
+        return res.status(500).json({
+          error: 'Airtable returned no record id',
+          target,
+          failedAt: f.filename,
+          created,
+          details: createBody,
+        });
+      }
+
+      const uploadUrl = `https://content.airtable.com/v0/${AIRTABLE_BASE_ID}/${recordId}/${encodeURIComponent(ATTACHMENT_FIELD)}/uploadAttachment`;
       const uploadResp = await fetch(uploadUrl, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${pat}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ contentType: f.contentType, file: f.fileBase64, filename: f.filename }),
       });
-      const upResult = await uploadResp.json().catch(() => ({}));
+      const uploadBody = await uploadResp.json().catch(() => ({}));
       if (!uploadResp.ok) {
         return res.status(uploadResp.status).json({
           error: 'Airtable file attach failed',
           target,
-          recordId: newRecordId,
           failedAt: f.filename,
-          uploaded: uploadedFiles,
-          details: upResult,
+          recordId,
+          created,
+          details: uploadBody,
         });
       }
-      uploadedFiles.push({ filename: f.filename, result: upResult });
+
+      created.push({ filename: f.filename, recordId, result: uploadBody });
     }
 
     return res.status(200).json({
       success: true,
       target,
-      recordId: newRecordId,
       fileType: targetCfg.fileType,
       portfolioId,
       budgetVersionId: targetCfg.needsBudgetVersion ? budgetVersionId : undefined,
-      count: uploadedFiles.length,
-      results: uploadedFiles,
+      count: created.length,
+      records: created,
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error', message: err.message });
